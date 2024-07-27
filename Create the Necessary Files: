@@ -1,3 +1,0 @@
-mkdir src
-touch src/index.js
-touch .env
