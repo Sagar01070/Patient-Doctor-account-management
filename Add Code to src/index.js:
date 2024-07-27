@@ -1,0 +1,109 @@
+const express = require('express');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { Pool } = require('pg');
+const multer = require('multer');
+const multerS3 = require('multer-s3');
+const aws = require('aws-sdk');
+const cors = require('cors');
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+require('dotenv').config();
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+aws.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION,
+});
+
+const s3 = new aws.S3();
+
+const upload = multer({
+  storage: multerS3({
+    s3,
+    bucket: process.env.S3_BUCKET_NAME,
+    acl: 'public-read',
+    metadata: (req, file, cb) => {
+      cb(null, { fieldName: file.fieldname });
+    },
+    key: (req, file, cb) => {
+      cb(null, `${req.user.id}/${Date.now().toString()}_${file.originalname}`);
+    },
+  }),
+});
+
+app.post('/api/signup', async (req, res) => {
+  const { name, email, password, specialty } = req.body;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const result = await pool.query(
+    'INSERT INTO Doctors (Name, Email, PasswordHash, Specialty) VALUES ($1, $2, $3, $4) RETURNING *',
+    [name, email, hashedPassword, specialty]
+  );
+  res.status(201).json(result.rows[0]);
+});
+
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  const result = await pool.query('SELECT * FROM Doctors WHERE Email = $1', [email]);
+  if (result.rows.length > 0) {
+    const user = result.rows[0];
+    const isValid = await bcrypt.compare(password, user.passwordhash);
+    if (isValid) {
+      const token = jwt.sign({ id: user.doctorid }, process.env.JWT_SECRET);
+      res.json({ token });
+    } else {
+      res.status(401).json({ error: 'Invalid password' });
+    }
+  } else {
+    res.status(404).json({ error: 'User not found' });
+  }
+});
+
+const authenticate = (req, res, next) => {
+  const token = req.header('Authorization').replace('Bearer ', '');
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+app.post('/api/upload', authenticate, upload.single('file'), async (req, res) => {
+  const { location } = req.file;
+  const result = await pool.query(
+    'INSERT INTO PDFs (DoctorID, FilePath, UploadDate) VALUES ($1, $2, $3) RETURNING *',
+    [req.user.id, location, new Date()]
+  );
+  res.status(201).json(result.rows[0]);
+});
+
+app.post('/api/link', async (req, res) => {
+  const { doctorId, patientId } = req.body;
+  const result = await pool.query(
+    'INSERT INTO DoctorPatient (DoctorID, PatientID) VALUES ($1, $2) RETURNING *',
+    [doctorId, patientId]
+  );
+  res.status(201).json(result.rows[0]);
+});
+
+app.get('/api/doctors', async (req, res) => {
+  const result = await pool.query('SELECT * FROM Doctors');
+  res.json(result.rows);
+});
+
+app.get('/api/patients', async (req, res) => {
+  const result = await pool.query('SELECT * FROM Patients');
+  res.json(result.rows);
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
