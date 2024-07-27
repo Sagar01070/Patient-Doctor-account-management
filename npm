@@ -1,0 +1,1 @@
+npm install express pg bcrypt jsonwebtoken dotenv multer multer-s3 aws-sdk cors
